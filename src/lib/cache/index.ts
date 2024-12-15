@@ -1,38 +1,45 @@
-interface Constructor<T> {
-  update: () => Promise<T>;
-  ttl: number;
-}
+import { UserDataStreamState, MemoryCache } from "./model";
 
-class MemoryCache<T> {
-  private state?: T;
-  private ttl: number;
-  private lastUpdatedAt: number;
-  private updater: () => Promise<T>;
+type RequestKey = string;
+type CacheState = UserDataStreamState;
 
-  constructor({ update, ttl }: Constructor<T>) {
-    this.ttl = ttl;
-    this.lastUpdatedAt = Date.now();
-    this.updater = update;
+class RequestCacheManager {
+  private cacheMap: Map<RequestKey, MemoryCache<CacheState>>;
+
+  constructor() {
+    this.cacheMap = new Map();
   }
 
-  private isOutdated = () => {
-    return Date.now() - this.lastUpdatedAt >= this.ttl;
-  };
-
-  update = async () => {
-    try {
-      this.state = await this.updater();
-      this.lastUpdatedAt = Date.now();
-    } catch (e) {
-      console.error("Failed to update cache: ", e);
-    }
-  };
-
-  read = async (): Promise<T | undefined> => {
-    if (!this.state || this.isOutdated()) {
-      await this.update();
+  getOrCreateCache(
+    key: RequestKey,
+    ttl: number,
+    updateFn: () => Promise<CacheState>
+  ): MemoryCache<CacheState> {
+    if (!this.cacheMap.has(key)) {
+      const cache = new MemoryCache<CacheState>({ update: updateFn, ttl });
+      this.cacheMap.set(key, cache);
     }
 
-    return this.state;
-  };
+    return this.cacheMap.get(key)!;
+  }
+
+  async read(key: RequestKey): Promise<CacheState | undefined> {
+    const cache = this.cacheMap.get(key);
+
+    if (cache) {
+      return await cache.read();
+    }
+
+    return undefined;
+  }
+
+  clear(key: RequestKey): void {
+    this.cacheMap.delete(key);
+  }
+
+  clearAll(): void {
+    this.cacheMap.clear();
+  }
 }
+
+export const dataStreamRequestCache = new RequestCacheManager();

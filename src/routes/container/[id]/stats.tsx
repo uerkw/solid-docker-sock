@@ -1,5 +1,9 @@
 import { createAsync, type RouteDefinition } from "@solidjs/router";
 import { useParams } from "@solidjs/router";
+import { requestYieldOnSocket } from "~/lib/docker/utils";
+import { dockerSocketOptions } from "~/api/container";
+import { dataStreamRequestCache } from "~/lib/cache";
+import { UserDataStreamState } from "~/lib/cache/model";
 import {
   Accessor,
   createEffect,
@@ -11,8 +15,6 @@ import {
   Resource,
   Suspense,
 } from "solid-js";
-import { requestYieldOnSocket } from "~/lib/docker/utils";
-import { dockerSocketOptions } from "~/api/container";
 
 interface LineIteratorProps {
   source?: AsyncGenerator<string>;
@@ -50,7 +52,7 @@ export default function Home() {
   const params = useParams();
 
   const [track, setTrack] = createSignal();
-  const [stopSignal, setStopSignal] = createSignal(false);
+  const [dataStreamKey, setDataStreamKey] = createSignal("");
 
   let abortController = new AbortController();
   let abortSignal = abortController.signal;
@@ -67,14 +69,49 @@ export default function Home() {
     }
   }
 
-  async function* fetchData(containerId: string) {
-    ("use server");
+  async function setRequestCache(
+    isAborted: boolean,
+    requestKey?: string
+  ): Promise<string> {
+    "use server";
+    const requestUUID = requestKey ? requestKey : crypto.randomUUID();
+    const state: UserDataStreamState = {
+      isAborted: isAborted,
+      requestKey: requestUUID,
+    };
+    const updateFn = async () => {
+      return state;
+    };
+    const cacheState = dataStreamRequestCache.getOrCreateCache(
+      requestUUID,
+      3_600_00,
+      updateFn
+    );
+    const cacheValue = await cacheState.read();
+    console.log(cacheValue);
+    if (cacheValue) {
+      return cacheValue.requestKey;
+    } else {
+      return "";
+    }
+  }
+
+  async function* fetchData(containerId: string, requestKey: string) {
+    "use server";
     const response = requestYieldOnSocket(
       dockerSocketOptions.socketPath,
       `/containers/${containerId}/stats`
     );
     try {
       outerloop: for await (const chunk of response) {
+        const currentCacheValue = await dataStreamRequestCache.read(requestKey);
+        const currentAbortStatus = currentCacheValue
+          ? currentCacheValue.isAborted
+          : false;
+        console.log(`Current abort status is ${currentAbortStatus}`);
+        if (currentAbortStatus) {
+          break outerloop;
+        }
         yield chunk.toString();
       }
       // Get the first response
@@ -91,17 +128,27 @@ export default function Home() {
   const [data] = createResource(
     () => (track() ? params.id : undefined),
     (containerId) => {
-      return fetchData(containerId);
+      return fetchData(containerId, dataStreamKey());
     }
   );
 
-  function start() {
+  async function start() {
+    const requestKey = await setRequestCache(false);
+    setDataStreamKey(requestKey);
+    console.log(`STARTED: Data stream key is : ${dataStreamKey()}`);
     setTrack(true);
   }
 
-  function stop() {
-    setStopSignal(true);
-    // What should be done here?
+  async function stop() {
+    if (!dataStreamKey()) {
+      alert("No data stream currently in progress!");
+      return;
+    }
+    const currentKey = dataStreamKey();
+    const requestKey = await setRequestCache(true, currentKey);
+    setDataStreamKey(requestKey);
+    console.log(`STOPPED: Data stream key is : ${dataStreamKey()}`);
+    setTrack(false);
   }
 
   return (
